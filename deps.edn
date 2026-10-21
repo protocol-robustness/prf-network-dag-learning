@@ -1,0 +1,7 @@
+{:paths ["src" "test"]
+ :deps {org.clojure/clojure {:mvn/version "1.12.0"}
+        protocol-robustness/framework
+        {:git/url "https://github.com/protocol-robustness/protocol-robustness-framework.git"
+         :git/sha "0c0134c4b34f121c8b2201657270198425f89f28"}}
+ :aliases {:run {:main-opts ["-m" "prf.network.dag.learning"]}
+           :test {:main-opts ["-m" "prf.network.dag.test-runner"]}}}
