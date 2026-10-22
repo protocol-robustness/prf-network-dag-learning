@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is]]
             [resolver-sim.evidence.reachability :as reach]
             [prf.network.dag.head-observation :as head]
+            [prf.network.dag.head-observation-demo :as head-demo]
             [prf.network.dag.learning :as learning])
   (:import [java.security KeyPairGenerator]))
 
@@ -57,6 +58,37 @@
       (let [{:keys [nonce observation]} (head/fetch-observation! (:url source))]
         (is (= nonce (:observation/client-nonce observation)))
         (is (= "head-observation.v1" (:observation/schema observation))))
+      (finally (head/stop-source! source)))))
+
+(deftest read-only-http-source-exposes-content-addressed-reconstruction-routes
+  (let [root "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        package {:checkpoint {:checkpoint/root root} :certificate {:certificate/root "cert"}}
+        successors [{:checkpoint {:checkpoint/root root}}]
+        source (head/start-source!
+                {:observation-fn (fn [nonce] {:observation/client-nonce nonce})
+                 :checkpoint-fn (fn [requested] (when (= root requested) package))
+                 :successors-fn (fn [anchor]
+                                  (cond
+                                    (= "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" anchor) successors
+                                    (= "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" anchor) []
+                                    :else nil))})]
+    (try
+      (is (= package (head/fetch-checkpoint-package! (:url source) root)))
+      (is (= successors
+             (head/fetch-successors!
+              (:base-url source)
+              "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
+      (if (try (requiring-resolve 'resolver-sim.network.checkpoint/verify-history)
+               true
+               (catch Exception _ false))
+        (let [reconstructed (head/reconstruct-history!
+                             (:base-url source)
+                             {:network/genesis-root "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                              :checkpoint/root "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
+                             {})]
+          (is (= [] (:entries reconstructed)))
+          (is (= :locally-valid (get-in reconstructed [:verification :status]))))
+        (is true "Run with the local PRF override to exercise history reconstruction."))
       (finally (head/stop-source! source)))))
 
 (deftest two-source-http-adapter-preserves-conflict-result-from-verifier
@@ -138,16 +170,41 @@
                    [root-a root-a]
                    {:status :certified
                     :head {:checkpoint/root root-a :checkpoint/sequence 7}
-                    :checkpoints [{:status :certified :checkpoint/root root-a}]})
+                    :checkpoints [{:status :certified :checkpoint/root root-a
+                                   :checkpoint/sequence 7}]})
           conflict (run-observation-check
                     [root-a root-b]
                     {:status :conflicting
                      :conflict/evidence
-                     [{:checkpoint {:checkpoint/root root-a}
+                     [{:checkpoint {:checkpoint/root root-a :checkpoint/sequence 7
+                                    :checkpoint/previous-root "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
                        :verification {:status :certified}}
-                      {:checkpoint {:checkpoint/root root-b}
+                      {:checkpoint {:checkpoint/root root-b :checkpoint/sequence 7
+                                    :checkpoint/previous-root "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
                        :verification {:status :certified}}]})]
       (is (= :current-observed (get-in current [:verification :status])))
       (is (= :conflicting (get-in conflict [:verification :status])))
       (is (false? (get-in conflict [:verification :valid?]))))
     (is true "Run with a reviewed PRF revision or local-root override to exercise signed HTTP observations.")))
+
+(deftest runnable-demo-reconstructs-two-certified-fork-successors-and-retains-evidence
+  (if (try (requiring-resolve 'resolver-sim.network.checkpoint/verify-history)
+           true
+           (catch Exception _ false))
+    (let [dir (java.nio.file.Files/createTempDirectory
+               "prf-head-demo-test" (make-array java.nio.file.attribute.FileAttribute 0))
+          path (.resolve dir "conflict.edn")
+          result (head-demo/demo (.toString path))
+          evidence (:evidence result)]
+      (is (= :conflicting (:status result)))
+      (is (= 2 (count (:checkpoint/packages evidence))))
+      (is (every? #(= :certified (get-in % [:verification :status]))
+                  (get-in evidence [:observation/evidence :histories])))
+      (is (every? #(and (= :certified (:status %)) (:valid? %))
+                  (:checkpoint/independent-process-verifications evidence)))
+      (is (every? false?
+                  (map #(get-in % [:verification :checkpoints 0 :quorum-safety
+                                   :intersection-bound-satisfied?])
+                       (get-in evidence [:observation/evidence :histories]))))
+      (is (java.nio.file.Files/exists path (make-array java.nio.file.LinkOption 0))))
+    (is true "Run with the local PRF override to execute the certificate-backed head demo.")))

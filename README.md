@@ -63,28 +63,45 @@ packet. Neither proves that the packet is complete or current.
 ## Checkpoint head observation (integration exercise)
 
 `src/prf/network/dag/head_observation.clj` adds a deliberately small read-only
-HTTP adapter for PRO-94. A source exposes `GET /head?nonce=...` and returns one
-EDN `head-observation.v1` value. The client sends a fresh random nonce to each
-source and passes both responses to PRF's `verify-observed-heads` API. This repo
-owns HTTP framing only; PRF owns signature, network/key binding, freshness,
-certified-history and conflict checks. The transport does not accept writes,
-choose a fork or assert global latestness.
+HTTP adapter for PRO-94. A source exposes `GET /head?nonce=...`,
+`GET /checkpoints/{root}`, and `GET /checkpoints?since={root}`. The latter two
+return immutable checkpoint/certificate/reconstruction packages from callbacks
+provided by the host. The client sends a fresh random nonce to each head source;
+the consumer fetches successor packages from a pinned checkpoint and reconstructs
+them with PRF before passing authenticated observations to PRF's
+`verify-observed-heads` API. This repo owns HTTP framing only; PRF owns canonical
+validation, signatures, network/key binding, freshness, certified-history and
+conflict checks. The transport does not accept writes, choose a fork or assert
+global latestness. EDN responses are parsed without custom tagged readers and
+all routes set `Cache-Control: no-store`.
 
-The API is provided by the PRO-93 PRF checkpoint implementation. Until that
-implementation is available in the framework revision pinned by `deps.edn`,
-the transport tests run with an injected verifier callback and demonstrate how
-an authenticated conflict result is carried through. To exercise the actual
-PRF verifier from a local PRF checkout, add that checkout's `src` directory to
-the classpath when running this project, for example:
+The API is provided by the PRO-93/94 PRF checkpoint implementation. The default
+published dependency revision currently predates it, so default tests cover
+transport framing; use the local PRF checkout override below to exercise signed
+observation verification and conflict classification against the implementation:
 
 ```sh
-clojure -Sdeps '{:deps {protocol-robustness/framework {:local/root "/path/to/protocol-robustness-framework"}}}' -M:test
+clojure -Sdeps '{:deps {protocol-robustness/framework {:local/root "/path/to/agent-c-2"}}}' -M:test
+clojure -Sdeps '{:deps {protocol-robustness/framework {:local/root "/path/to/agent-c-2"}}}' -M:head-demo
 ```
 
-Before treating this as a runnable public integration, update the framework
-dependency to a published, reviewed PRF revision that exposes
-`resolver-sim.network.checkpoint/verify-observed-heads`. The local adapter does
-not copy or approximate that verifier.
+The second command creates a four-witness snapshot and two 2-of-4 certificates
+for different successors of the same pinned genesis. It starts two loopback
+HTTP sources with separate ephemeral observation keys, requests fresh
+nonce-bound heads, and launches two fresh JVM verifier processes. Each fetches,
+reconstructs and certifies one history from the same pinned genesis; the
+coordinator then reports `:conflicting` for the two signed heads. The threshold
+does not meet the configured
+intersection bound, so the certificates are not presented as Byzantine-safe.
+The command writes a new EDN evidence bundle containing both checkpoint
+packages, certificates, source public keys, signed observations, nonces and
+verification results. It refuses to overwrite an existing bundle. Record the exact PRF revision used for each local run alongside the evidence bundle. These local endpoints share one machine
+and JVM, so this is not evidence of independent operators or a public network.
+
+The project must pin a published, reviewed PRF revision exposing
+`resolver-sim.network.checkpoint/verify-observed-heads` before the end-to-end
+signed-observation test runs from the default public dependency. The local
+adapter does not copy or approximate that verifier.
 
 The host application supplies `start-source!` an observation provider that
 signs the nonce and current checkpoint for each request. It separately
@@ -93,6 +110,16 @@ groups, plus a certified history reconstructed through PRF. The adapter
 generates a distinct nonce per source, then passes both artifacts and nonce
 bindings to `prf-verifier`. A matching result means only that the configured
 sources freshly reported the same certified head.
+
+This is an integration contract, not a deployed service. The source callbacks
+must serve content-addressed immutable package bodies, and operators must retain
+fetched observations, packages and conflict evidence if they need a forensic
+record. Two localhost processes are useful for the mechanics test but do not
+establish operator or infrastructure independence. A source that is one
+checkpoint behind is stale relative to a separately reconstructed newer head;
+two valid equal-sequence successors of one parent remain `conflicting` with
+both packages available for review. Even agreement from two configured sources
+cannot exclude a newer checkpoint withheld from both.
 
 ## How to extend the exercise
 
