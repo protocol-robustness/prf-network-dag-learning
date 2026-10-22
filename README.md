@@ -5,9 +5,10 @@ as a network-scoped, forkable DAG and checked independently by two local replica
 
 This is a teaching example. It is not a PRF network protocol, canonical PRF
 schema, consensus implementation, or production ratification service. “Replica”
-here means a second local verifier given the same packet and a separately
-configured trusted network root. It does not mean peers exchanged data or agreed
-on the globally current graph.
+in the packet example means a second local verifier given the same packet and a
+separately configured trusted network root. The checkpoint exercise adds
+loopback HTTP exchange between separate local source processes, but does not
+establish an independently operated network or a globally current graph.
 
 ## Run it
 
@@ -54,11 +55,13 @@ must verify signer identity and eligibility, bind each attestation to the exact
 basis and policy, evaluate ratification under its authority policy, and verify
 the authorized result again when consuming it.
 
-The example also does not provide peer discovery, transport, durable replicated
+The packet example does not provide peer discovery, transport, durable replicated
 storage, fork choice, append authorization, equivocation handling, ordering,
-finality, or a truthful global “latest” view. Content addressing proves that a
-packet matches its contents; reachability proves graph connectivity within that
-packet. Neither proves that the packet is complete or current.
+finality, or a truthful global “latest” view. The separate checkpoint exercise
+below demonstrates read-only HTTP exchange and signed head comparison, not those
+network services. Content addressing proves that a packet matches its contents;
+reachability proves graph connectivity within that packet. Neither proves that
+the packet is complete or current.
 
 ## Checkpoint head observation (integration exercise)
 
@@ -87,16 +90,21 @@ clojure -Sdeps '{:deps {protocol-robustness/framework {:local/root "/path/to/age
 
 The second command creates a four-witness snapshot and two 2-of-4 certificates
 for different successors of the same pinned genesis. It starts two loopback
-HTTP sources with separate ephemeral observation keys, requests fresh
-nonce-bound heads, and launches two fresh JVM verifier processes. Each fetches,
+HTTP source processes; each generates an ephemeral observation key and serves
+one immutable successor package. The local coordinator receives each public
+key at startup, pins it for this run, requests fresh nonce-bound heads, and
+launches two additional fresh JVM verifier processes. Each verifier fetches,
 reconstructs and certifies one history from the same pinned genesis; the
-coordinator then reports `:conflicting` for the two signed heads. The threshold
+coordinator then reports `:conflicting` for the two signed heads. The key
+exchange is demo bootstrapping, not an external trust ceremony. The threshold
 does not meet the configured
 intersection bound, so the certificates are not presented as Byzantine-safe.
 The command writes a new EDN evidence bundle containing both checkpoint
 packages, certificates, source public keys, signed observations, nonces and
-verification results. It refuses to overwrite an existing bundle. Record the exact PRF revision used for each local run alongside the evidence bundle. These local endpoints share one machine
-and JVM, so this is not evidence of independent operators or a public network.
+verification results. It refuses to overwrite an existing bundle. Record the exact PRF
+revision used for each local run alongside the evidence bundle. The source
+processes and coordinator share one machine and operator, so this is not
+evidence of administrative independence or a public network.
 
 The project must pin a published, reviewed PRF revision exposing
 `resolver-sim.network.checkpoint/verify-observed-heads` before the end-to-end
@@ -114,9 +122,10 @@ sources freshly reported the same certified head.
 This is an integration contract, not a deployed service. The source callbacks
 must serve content-addressed immutable package bodies, and operators must retain
 fetched observations, packages and conflict evidence if they need a forensic
-record. Two localhost processes are useful for the mechanics test but do not
-establish operator or infrastructure independence. A source that is one
-checkpoint behind is stale relative to a separately reconstructed newer head;
+record. The two source processes have separate ephemeral keys but share a host
+and coordinator; they do not establish operator or infrastructure independence.
+A source that is one checkpoint behind is stale relative to a separately
+reconstructed newer head;
 two valid equal-sequence successors of one parent remain `conflicting` with
 both packages available for review. Even agreement from two configured sources
 cannot exclude a newer checkpoint withheld from both.
@@ -130,7 +139,7 @@ cannot exclude a newer checkpoint withheld from both.
    question, evidence and policy roots.
 4. Add a signed ratification decision that names the exact basis and verifies it
    again at consumption.
-5. Only then design a transport and replication protocol. Specify fork handling,
+5. Only then design a production transport and replication protocol. Specify fork handling,
    append authority, replay protection and how peers establish currentness before
    calling this a network-native DAG.
 

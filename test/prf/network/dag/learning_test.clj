@@ -198,6 +198,8 @@
           evidence (:evidence result)]
       (is (= :conflicting (:status result)))
       (is (= 2 (count (:checkpoint/packages evidence))))
+      (is (= 2 (count (:source/processes evidence))))
+      (is (= 2 (count (distinct (map :source/id (:source/processes evidence))))))
       (is (every? #(= :certified (get-in % [:verification :status]))
                   (get-in evidence [:observation/evidence :histories])))
       (is (every? #(and (= :certified (:status %)) (:valid? %))

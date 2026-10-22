@@ -5,13 +5,17 @@
    mechanics, not operator independence or global latestness."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [prf.network.dag.head-observation :as head]
             [resolver-sim.hash.canonical :as canonical])
   (:import [java.nio.charset StandardCharsets]
            [java.nio.file Files OpenOption Path Paths StandardOpenOption]
-           [java.security KeyPair KeyPairGenerator]
+           [java.security KeyFactory KeyPair KeyPairGenerator]
            [java.time Instant]
-           [java.util Base64]))
+           [java.util Base64]
+           [java.util.concurrent TimeUnit]
+           [java.security.spec X509EncodedKeySpec]
+           [java.io BufferedReader InputStreamReader]))
 
 (defn- hash-ref [domain value]
   (str "sha256:" (canonical/domain-hash domain value)))
@@ -27,6 +31,55 @@
        (.encodeToString (Base64/getMimeEncoder 64 (.getBytes "\n" StandardCharsets/US_ASCII))
                         (.getEncoded key))
        "\n-----END PUBLIC KEY-----\n"))
+
+(defn- parse-public-key-content [content]
+  (let [encoded (-> content
+                    (str/replace #"-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\s" ""))
+        bytes (.decode (Base64/getDecoder) ^String encoded)]
+    (.generatePublic (KeyFactory/getInstance "Ed25519")
+                     (X509EncodedKeySpec. bytes))))
+
+(defn- start-source-process! [directory index network-root package]
+  (let [configuration (Files/createTempFile directory (str "source-" index "-") ".edn"
+                                                  (make-array java.nio.file.attribute.FileAttribute 0))
+        config {:network-root network-root
+                :source-id (str "local-source:" index)
+                :key-id (str "local-key:" index)
+                :package package}
+        _ (Files/write configuration (.getBytes (pr-str config) StandardCharsets/UTF_8)
+                        (into-array OpenOption [StandardOpenOption/WRITE
+                                                StandardOpenOption/TRUNCATE_EXISTING]))
+        java-bin (str (System/getProperty "java.home") "/bin/java")
+        command [java-bin "-cp" (System/getProperty "java.class.path")
+                 "clojure.main" "-m"
+                 "prf.network.dag.head-observation-source-process"
+                 (.toString configuration)]
+        process (.start (ProcessBuilder. ^java.util.List command))
+        reader (BufferedReader. (InputStreamReader. (.getInputStream process)
+                                                   StandardCharsets/UTF_8))
+        ready-line (.readLine reader)
+        ready (when ready-line (edn/read-string ready-line))]
+    (when-not (and (:ready? ready) (:url ready))
+      (.destroyForcibly process)
+      (throw (ex-info "Checkpoint source process failed to start"
+                      {:reason :demo/source-process-start-failed
+                       :source/index index :output ready-line})))
+    {:process process
+     :reader reader
+     :configuration configuration
+     :ready ready
+     :url (:url ready)
+     :base-url (str/replace (:url ready) #"/head$" "")}))
+
+(defn- stop-source-process! [{:keys [^Process process ^BufferedReader reader configuration]}]
+  (when process
+    (try (.close (.getOutputStream process)) (catch Exception _ nil))
+    (when-not (.waitFor process 5 TimeUnit/SECONDS)
+      (.destroyForcibly process)
+      (.waitFor process 5 TimeUnit/SECONDS)))
+  (when reader (try (.close reader) (catch Exception _ nil)))
+  (when configuration (Files/deleteIfExists configuration))
+  nil)
 
 (defn- persist-new! [path artifact]
   (let [^Path path (Paths/get path (make-array String 0))
@@ -128,7 +181,6 @@
 (defn demo [output-path]
   (let [network-root (hash-ref "prf-learning-demo-network.v1" {:id "split-head"})
         signer-pairs (mapv (fn [_] (keypair)) (range 4))
-        observer-pairs (mapv (fn [_] (keypair)) (range 2))
         members (mapv signer-member (range 4) signer-pairs)
         policy-root (hash-ref "prf-learning-demo-policy.v1" {:threshold 2})
         membership-root (hash-ref "prf-learning-demo-membership.v1"
@@ -152,13 +204,6 @@
                                      state-root signer-pairs [0 1] lock-dir)
                    (signed-successor "right" network-root genesis policy membership
                                      state-root signer-pairs [2 3] lock-dir)]
-        observer-sources (mapv (fn [i]
-                                {:source/id (str "local-source:" i)
-                                 :source/key-id (str "local-key:" i)
-                                 :network/genesis-root network-root
-                                 :source/public-key (.getPublic ^KeyPair (nth observer-pairs i))
-                                 :source/independence-group (keyword (str "local-operator-" i))})
-                              [0 1])
         adapters {:resolve-authority (fn [_ _ _] {:policy policy :membership membership})
                   :verify-event (fn [_] {:valid? true})
                   :verify-completeness (fn [_ _ _] {:valid? true})
@@ -167,27 +212,21 @@
                              :resulting-policy-root policy-root
                              :resulting-membership-root membership-root
                              :resulting-epoch 0 :state {:accepted-event-roots #{}}})}
+        source-directory (Files/createTempDirectory "prf-head-source-processes"
+                                                    (make-array java.nio.file.attribute.FileAttribute 0))
         servers (mapv (fn [i]
-                        (let [{:keys [checkpoint]} (nth packages i)
-                              ^KeyPair pair (nth observer-pairs i)]
-                          (head/start-source!
-                           {:observation-fn
-                            (fn [nonce]
-                              ((prf-checkpoint-api "sign-head-observation")
-                               {:genesis-root network-root
-                                :source-id (str "local-source:" i)
-                                :key-id (str "local-key:" i)
-                                :checkpoint checkpoint
-                                :client-nonce nonce
-                                :issued-at (.toString (Instant/now))
-                                :private-key (.getPrivate pair)}))
-                            :checkpoint-fn (fn [root]
-                                             (first (filter #(= root (get-in % [:checkpoint :checkpoint/root]))
-                                                            packages)))
-                            :successors-fn (fn [anchor]
-                                             (when (= anchor genesis-root)
-                                               [(nth packages i)]))})))
-                      [0 1])]
+                        (start-source-process! source-directory i network-root (nth packages i)))
+                      [0 1])
+        observer-sources (mapv (fn [{:keys [ready]} i]
+                                {:source/id (:source/id ready)
+                                 :source/key-id (:source/key-id ready)
+                                 :network/genesis-root network-root
+                                 :source/public-key (parse-public-key-content
+                                                     (:source/public-key-content ready))
+                                 ;; These are separately configured process labels for this
+                                 ;; one-machine exercise, not claims of operator independence.
+                                 :source/independence-group (keyword (str "local-process-" i))})
+                              servers [0 1])]
     (try
       (let [trusted-genesis (assoc genesis :checkpoint/root genesis-root)
             independent-verifications
@@ -208,12 +247,16 @@
                       :authority/policy policy
                       :authority/membership membership
                       :observer/source-trust
-                      (mapv (fn [source ^KeyPair pair]
+                      (mapv (fn [source]
                               (-> source
                                   (dissoc :source/public-key)
                                   (assoc :source/public-key-content
-                                         (public-key-content (.getPublic pair)))))
-                            observer-sources observer-pairs)
+                                         (public-key-content (:source/public-key source)))))
+                            observer-sources)
+                      :source/processes
+                      (mapv (fn [{:keys [ready]}]
+                              (select-keys ready [:source/id :source/key-id :url]))
+                            servers)
                       :checkpoint/packages packages
                       :checkpoint/independent-process-verifications independent-verifications
                       :observation/evidence result}
@@ -225,10 +268,12 @@
                      :certificate-roots (mapv #(get-in % [:certificate :certificate/root]) packages)
                      :independent-process-results independent-verifications
                      :evidence-path evidence-path
-                     :limitation "Both checkpoint histories and head statements are locally verified. The sources share one JVM and do not establish operator independence or global latestness."}]
+                     :limitation "Head sources run in separate local processes and are independently keyed for this run. They share one host and demo coordinator; this does not establish independent operators, persistent identity, or global latestness."}]
         (println (pr-str summary))
         (assoc summary :evidence artifact))
-      (finally (run! head/stop-source! servers)))))
+      (finally
+        (run! stop-source-process! servers)
+        (Files/deleteIfExists source-directory)))))
 
 (defn -main [& [output-path]]
   (demo (or output-path
