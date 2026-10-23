@@ -101,8 +101,10 @@ does not meet the configured
 intersection bound, so the certificates are not presented as Byzantine-safe.
 The command writes a new EDN evidence bundle containing both checkpoint
 packages, certificates, source public keys, signed observations, nonces and
-verification results. It refuses to overwrite an existing bundle. Record the exact PRF
-revision used for each local run alongside the evidence bundle. The source
+verification results. It refuses to overwrite an existing bundle. Set
+`PRF_CHECKPOINT_SOURCE_REVISION` and `PRF_CHECKPOINT_SOURCE_DIRTY` when running
+the demo to retain the local PRF checkout's revision and dirty-state indicator
+in the bundle. The source
 processes and coordinator share one machine and operator, so this is not
 evidence of administrative independence or a public network.
 
@@ -129,6 +131,39 @@ reconstructed newer head;
 two valid equal-sequence successors of one parent remain `conflicting` with
 both packages available for review. Even agreement from two configured sources
 cannot exclude a newer checkpoint withheld from both.
+
+## Guided checkpoint walkthrough
+
+The [`prf-notebooks` checkpoint walkthrough](https://github.com/protocol-robustness/prf-notebooks/blob/main/notebooks/network_checkpoint_head_observation.clj)
+guides you through running `-M:head-demo`, retaining its evidence bundle, and
+inspecting the branch certificates, per-source observations, verifier outcomes
+and evidence limits. It uses this repository's existing demo; it does not
+reimplement checkpoint construction or verification.
+
+Use a local PRF checkout that exposes the checkpoint API. From this repository,
+run the following after setting `PRF_CHECKPOINT_SOURCE_ROOT` to that checkout:
+
+```sh
+export PRF_CHECKPOINT_SOURCE_REVISION="$(jj --repository "$PRF_CHECKPOINT_SOURCE_ROOT" log -r @ --no-graph -T 'commit_id')"
+export PRF_CHECKPOINT_SOURCE_DIRTY=unknown
+# For a Git checkout, use `git -C "$PRF_CHECKPOINT_SOURCE_ROOT" rev-parse HEAD`
+# and record `git status --porcelain` separately if the worktree is dirty.
+export PRF_NETWORK_DEMO_EVIDENCE="$PWD/target/head-observation-$(date -u +%Y%m%dT%H%M%SZ)-$$.edn"
+mkdir -p target
+clojure -Sdeps "{:deps {protocol-robustness/framework {:local/root \"$PRF_CHECKPOINT_SOURCE_ROOT\"}}}" \
+  -M:head-demo "$PRF_NETWORK_DEMO_EVIDENCE"
+```
+
+Then start Clerk from a `prf-notebooks` checkout with the evidence path in the
+environment:
+
+```sh
+PRF_NETWORK_DEMO_EVIDENCE="$PRF_NETWORK_DEMO_EVIDENCE" clojure -M:prf-host:serve
+```
+
+Open `http://localhost:7777/notebooks/network_checkpoint_head_observation.clj`.
+The notebook parses and displays the saved bundle. It reports missing or
+unreadable files instead of silently substituting fixture results.
 
 ## How to extend the exercise
 

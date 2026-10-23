@@ -81,11 +81,20 @@
   (when configuration (Files/deleteIfExists configuration))
   nil)
 
+(defn- portable-edn [value]
+  (cond
+    (instance? Instant value) (.toString ^Instant value)
+    (map? value) (into (empty value) (map (fn [[k v]] [(portable-edn k) (portable-edn v)])) value)
+    (vector? value) (mapv portable-edn value)
+    (set? value) (into #{} (map portable-edn) value)
+    (sequential? value) (mapv portable-edn value)
+    :else value))
+
 (defn- persist-new! [path artifact]
   (let [^Path path (Paths/get path (make-array String 0))
         parent (.getParent (.toAbsolutePath path))]
     (when parent (Files/createDirectories parent (make-array java.nio.file.attribute.FileAttribute 0)))
-    (Files/write path (.getBytes (pr-str artifact) StandardCharsets/UTF_8)
+    (Files/write path (.getBytes (pr-str (portable-edn artifact)) StandardCharsets/UTF_8)
                  (into-array OpenOption [StandardOpenOption/CREATE_NEW
                                          StandardOpenOption/WRITE]))
     (.toString (.toAbsolutePath path))))
@@ -241,7 +250,13 @@
                      :trusted-sources observer-sources
                      :verification-context {:threshold 2}
                      :clock #(Instant/now)})
-            artifact {:artifact/schema "prf-learning-head-conflict-demonstration.v1"
+            artifact {:artifact/schema "prf-learning-head-conflict-demonstration.v2"
+                      :prf/source-revision (let [revision (System/getenv "PRF_CHECKPOINT_SOURCE_REVISION")]
+                                             (if (seq revision) revision "not-supplied"))
+                      :prf/source-dirty? (case (System/getenv "PRF_CHECKPOINT_SOURCE_DIRTY")
+                                           "true" true
+                                           "false" false
+                                           nil)
                       :network/genesis-root network-root
                       :trusted-genesis trusted-genesis
                       :authority/policy policy
@@ -259,6 +274,7 @@
                             servers)
                       :checkpoint/packages packages
                       :checkpoint/independent-process-verifications independent-verifications
+                      :observation/threshold 2
                       :observation/evidence result}
             evidence-path (persist-new! output-path artifact)
             summary {:demo "two-source authenticated checkpoint head conflict"
