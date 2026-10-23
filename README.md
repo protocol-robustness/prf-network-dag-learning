@@ -134,7 +134,7 @@ cannot exclude a newer checkpoint withheld from both.
 
 ## Guided checkpoint walkthrough
 
-The [`prf-notebooks` checkpoint walkthrough](https://github.com/protocol-robustness/prf-notebooks/blob/main/notebooks/network_checkpoint_head_observation.clj)
+The [`prf-notebooks` checkpoint walkthrough](https://github.com/protocol-robustness/prf-notebooks/blob/network-checkpoint-walkthrough/notebooks/network_checkpoint_head_observation.clj)
 guides you through running `-M:head-demo`, retaining its evidence bundle, and
 inspecting the branch certificates, per-source observations, verifier outcomes
 and evidence limits. It uses this repository's existing demo; it does not
