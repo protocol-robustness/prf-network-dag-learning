@@ -57,7 +57,19 @@
     (try
       (let [{:keys [nonce observation]} (head/fetch-observation! (:url source))]
         (is (= nonce (:observation/client-nonce observation)))
-        (is (= "head-observation.v1" (:observation/schema observation))))
+        (is (= "head-observation.v1" (:observation/schema observation)))
+        (let [request (-> (java.net.http.HttpRequest/newBuilder
+                           (java.net.URI/create (:url source)))
+                          (.POST (java.net.http.HttpRequest$BodyPublishers/noBody))
+                          .build)
+              response (.send (java.net.http.HttpClient/newHttpClient)
+                              request
+                              (java.net.http.HttpResponse$BodyHandlers/ofString))]
+          (is (= 405 (.statusCode response))
+              "the observation endpoint rejects write methods")
+          (is (= "no-store"
+                 (.orElse (.firstValue (.headers response) "Cache-Control") ""))
+              "observation responses are not cached")))
       (finally (head/stop-source! source)))))
 
 (deftest read-only-http-source-exposes-content-addressed-reconstruction-routes
@@ -87,7 +99,8 @@
                               :checkpoint/root "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
                              {})]
           (is (= [] (:entries reconstructed)))
-          (is (= :locally-valid (get-in reconstructed [:verification :status]))))
+          (is (= :stale-or-unknown (get-in reconstructed [:verification :status]))
+              "an absent trusted anchor cannot be treated as a valid empty history"))
         (is true "Run with the local PRF override to exercise history reconstruction."))
       (finally (head/stop-source! source)))))
 
@@ -186,6 +199,122 @@
       (is (= :conflicting (get-in conflict [:verification :status])))
       (is (false? (get-in conflict [:verification :valid?]))))
     (is true "Run with a reviewed PRF revision or local-root override to exercise signed HTTP observations.")))
+
+(deftest older-two-source-head-is-not-reported-current
+  (if-let [sign-observation (try
+                             (requiring-resolve 'resolver-sim.network.checkpoint/sign-head-observation)
+                             (catch Exception _ nil))]
+    (let [network-root (str "sha256:" (apply str (repeat 64 "a")))
+        older-root (str "sha256:" (apply str (repeat 64 "b")))
+        newer-root (str "sha256:" (apply str (repeat 64 "c")))
+        now (java.time.Instant/now)
+        pairs (mapv (fn [_] (.generateKeyPair (KeyPairGenerator/getInstance "Ed25519"))) [0 1])
+        sources (mapv (fn [i]
+                        {:source/id (str "stale-source:" i)
+                         :source/key-id (str "stale-key:" i)
+                         :network/genesis-root network-root
+                         :source/public-key (.getPublic (nth pairs i))
+                         :source/independence-group (keyword (str "stale-operator-" i))})
+                      [0 1])
+        certified-head {:status :certified
+                        :head {:checkpoint/root newer-root :checkpoint/sequence 8}
+                        :checkpoints [{:status :certified
+                                       :checkpoint/root older-root :checkpoint/sequence 7}
+                                      {:status :certified
+                                       :checkpoint/root newer-root :checkpoint/sequence 8}]}
+        run (fn [roots]
+              (let [servers (mapv (fn [i]
+                              (head/start-source!
+                               {:observation-fn
+                                (fn [nonce]
+                                  (sign-observation
+                                   {:genesis-root network-root
+                                    :source-id (str "stale-source:" i)
+                                    :key-id (str "stale-key:" i)
+                                    :checkpoint {:checkpoint/root (nth roots i)
+                                                 :checkpoint/sequence (if (= older-root (nth roots i)) 7 8)}
+                                    :client-nonce nonce
+                                    :issued-at (.toString now)
+                                    :private-key (.getPrivate (nth pairs i))}))}))
+                            [0 1])]
+          (try
+            (head/observe-two-sources!
+             (mapv (fn [server] {:url (:url server)}) servers)
+               (head/prf-verifier
+                {:sources sources
+                 :verification-context {:network/genesis-root network-root
+                                        :certified-head certified-head}
+                 :clock (constantly now)}))
+              (finally (run! head/stop-source! servers)))))
+        both-behind (run [older-root older-root])
+        one-source-behind (run [older-root newer-root])]
+      (doseq [result [both-behind one-source-behind]]
+        (is (= :stale-or-unknown (get-in result [:verification :status])))
+        (is (false? (get-in result [:verification :valid?])))))
+    (is true "Run with the local PRF checkpoint API override to exercise stale signed heads.")))
+
+(deftest replayed-expired-and-invalid-signed-heads-do-not-count-as-current
+  (if-let [sign-observation (try
+                             (requiring-resolve 'resolver-sim.network.checkpoint/sign-head-observation)
+                             (catch Exception _ nil))]
+    (let [network-root (str "sha256:" (apply str (repeat 64 "a")))
+          other-network (str "sha256:" (apply str (repeat 64 "e")))
+          checkpoint-root (str "sha256:" (apply str (repeat 64 "b")))
+          now (java.time.Instant/now)
+          pairs (mapv (fn [_] (.generateKeyPair (KeyPairGenerator/getInstance "Ed25519"))) [0 1])
+          sources (mapv (fn [i]
+                          {:source/id (str "fresh-source:" i)
+                           :source/key-id (str "fresh-key:" i)
+                           :network/genesis-root network-root
+                           :source/public-key (.getPublic (nth pairs i))
+                           :source/independence-group (keyword (str "fresh-operator-" i))})
+                        [0 1])
+          certified-head {:status :certified
+                          :head {:checkpoint/root checkpoint-root :checkpoint/sequence 7}
+                          :checkpoints [{:status :certified :checkpoint/root checkpoint-root
+                                         :checkpoint/sequence 7}]}
+          observe (fn [mode]
+                    (let [servers (mapv (fn [i]
+                                (head/start-source!
+                                 {:observation-fn
+                                  (fn [request-nonce]
+                                    (let [body {:genesis-root (if (= mode :wrong-network)
+                                                                other-network network-root)
+                                               :source-id (str "fresh-source:" i)
+                                               :key-id (str "fresh-key:" i)
+                                               :checkpoint {:checkpoint/root checkpoint-root
+                                                            :checkpoint/sequence 7}
+                                               :client-nonce (if (= mode :replayed-nonce)
+                                                               "previous-request-nonce-0001"
+                                                               request-nonce)
+                                               :issued-at (.toString
+                                                           (case mode
+                                                             :expired (.minusSeconds now 31)
+                                                             :future (.plusSeconds now 2)
+                                                             now))
+                                               :private-key (.getPrivate (nth pairs i))}
+                                          signed (sign-observation body)]
+                                      (if (= mode :invalid-signature)
+                                        (assoc-in signed [:observation/signature :signature :value]
+                                                  "invalid-signature")
+                                        signed)))}))
+                              [0 1])]
+            (try
+              (head/observe-two-sources!
+               (mapv (fn [server] {:url (:url server)}) servers)
+               (head/prf-verifier
+                {:sources sources
+                 :verification-context {:network/genesis-root network-root
+                                        :certified-head certified-head
+                                        :max-age-seconds 30
+                                        :max-future-skew-seconds 1}
+                 :clock (constantly now)}))
+                    (finally (run! head/stop-source! servers)))))]
+      (doseq [mode [:replayed-nonce :expired :future]]
+        (is (= :stale-or-unknown (get-in (observe mode) [:verification :status]))))
+      (doseq [mode [:invalid-signature :wrong-network]]
+        (is (= :invalid (get-in (observe mode) [:verification :status])))))
+    (is true "Run with the local PRF checkpoint API override to exercise signed-head rejection cases.")))
 
 (deftest runnable-demo-reconstructs-two-certified-fork-successors-and-retains-evidence
   (if (try (requiring-resolve 'resolver-sim.network.checkpoint/verify-history)
