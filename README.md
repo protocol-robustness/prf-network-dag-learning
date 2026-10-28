@@ -78,14 +78,17 @@ conflict checks. The transport does not accept writes, choose a fork or assert
 global latestness. EDN responses are parsed without custom tagged readers and
 all routes set `Cache-Control: no-store`.
 
-The API is provided by the PRO-93/94 PRF checkpoint implementation. The default
-published dependency revision currently predates it, so default tests cover
-transport framing; use the local PRF checkout override below to exercise signed
-observation verification and conflict classification against the implementation:
+The API is provided by the PRO-93 PRF checkpoint implementation. The dependency
+is pinned to immutable commit `fa13bf6ec38d41db8b4d9b387ec9173d0c58a2ed` from
+[draft PRF pull request #27](https://github.com/protocol-robustness/protocol-robustness-framework/pull/27).
+This allows the demonstration and verifier-dependent tests to run from a public
+checkout. The PR is awaiting review and merge, so treat this as a candidate
+implementation until that review completes. After merge, update the pin to the
+reviewed PRF revision.
 
 ```sh
-clojure -Sdeps '{:deps {protocol-robustness/framework {:local/root "/path/to/agent-c-2"}}}' -M:test
-clojure -Sdeps '{:deps {protocol-robustness/framework {:local/root "/path/to/agent-c-2"}}}' -M:head-demo
+clojure -M:test
+clojure -M:head-demo
 ```
 
 The second command creates a four-witness snapshot and two 2-of-4 certificates
@@ -108,10 +111,13 @@ in the bundle. The source
 processes and coordinator share one machine and operator, so this is not
 evidence of administrative independence or a public network.
 
-The project must pin a published, reviewed PRF revision exposing
-`resolver-sim.network.checkpoint/verify-observed-heads` before the end-to-end
-signed-observation test runs from the default public dependency. The local
-adapter does not copy or approximate that verifier.
+The tests also verify that POST is rejected, responses are not cached,
+one stale source is enough to classify the observation as stale, replayed nonces
+and expired/future observations do not count as current, and invalid signatures
+or a wrong network identity fail verification. These checks run against the
+exact PRF candidate commit above; the local adapter does not copy or approximate
+the verifier. The optional local checkout override remains useful when changing
+PRF source during development.
 
 The host application supplies `start-source!` an observation provider that
 signs the nonce and current checkpoint for each request. It separately
@@ -134,7 +140,7 @@ cannot exclude a newer checkpoint withheld from both.
 
 ## Guided checkpoint walkthrough
 
-The [`prf-notebooks` checkpoint walkthrough](https://github.com/protocol-robustness/prf-notebooks/blob/main/notebooks/network_checkpoint_head_observation.clj)
+The [`prf-notebooks` checkpoint walkthrough](https://github.com/protocol-robustness/prf-notebooks/blob/network-checkpoint-walkthrough/notebooks/network_checkpoint_head_observation.clj)
 guides you through running `-M:head-demo`, retaining its evidence bundle, and
 inspecting the branch certificates, per-source observations, verifier outcomes
 and evidence limits. It uses this repository's existing demo; it does not
