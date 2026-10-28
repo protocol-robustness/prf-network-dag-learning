@@ -2,7 +2,7 @@
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         protocol-robustness/framework
         {:git/url "https://github.com/protocol-robustness/protocol-robustness-framework.git"
-         :git/sha "0c0134c4b34f121c8b2201657270198425f89f28"}}
+         :git/sha "fa13bf6ec38d41db8b4d9b387ec9173d0c58a2ed"}}
  :aliases {:run {:main-opts ["-m" "prf.network.dag.learning"]}
            :head-demo {:main-opts ["-m" "prf.network.dag.head-observation-demo"]}
            :test {:main-opts ["-m" "prf.network.dag.test-runner"]}}}
